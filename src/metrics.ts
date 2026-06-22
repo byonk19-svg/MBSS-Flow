@@ -43,7 +43,7 @@ export function deriveStudyMetrics(study: Study, nextStudy?: Study): StudyMetric
     studyDurationMin: minutesBetween(study.patientOnVanAt, study.patientLeavesVanAt),
     documentationDurationMin: minutesBetween(study.patientLeavesVanAt, study.documentationCompleteAt),
     totalPatientCycleMin: minutesBetween(study.patientOnVanAt, study.documentationCompleteAt),
-    interStudyGapMin: minutesBetween(study.documentationCompleteAt, nextStudy?.patientOnVanAt),
+    interStudyGapMin: minutesBetween(study.patientLeavesVanAt, nextStudy?.patientOnVanAt),
   };
 }
 

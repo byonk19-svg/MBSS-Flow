@@ -54,7 +54,7 @@ describe('metrics', () => {
       studyDurationMin: 23,
       documentationDurationMin: 12,
       totalPatientCycleMin: 35,
-      interStudyGapMin: 15,
+      interStudyGapMin: 27,
     });
   });
 
@@ -70,7 +70,7 @@ describe('metrics', () => {
       averageStudyDurationMin: 21.5,
       averageDocumentationDurationMin: 12.5,
       averagePatientCycleMin: 34,
-      averageInterStudyGapMin: 15,
+      averageInterStudyGapMin: 27,
     });
   });
 

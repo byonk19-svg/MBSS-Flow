@@ -10,9 +10,11 @@ test('tracks a complete stop and exposes logs, dashboard, and export actions', a
   await expect(page.getByRole('heading', { name: 'Facility A' })).toBeVisible();
 
   await page.getByRole('button', { name: /^Pt On Van$/i }).click();
-  await expect(page.getByRole('heading', { name: 'Active study' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Patient on van' })).toBeVisible();
   await page.getByRole('button', { name: /Pt Leaves Van/i }).click();
-  await page.getByRole('button', { name: /Documentation Complete/i }).click();
+  await expect(page.getByRole('heading', { name: 'Pending documentation' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Pt On Van$/i })).toBeVisible();
+  await page.getByRole('button', { name: /Doc Complete/i }).click();
   await page.getByRole('button', { name: /Finish Stop/i }).click();
 
   await page.getByRole('button', { name: /Logs/i }).click();
@@ -79,6 +81,42 @@ test('captures study delay details before Pt On Van without closing the stop', a
   expect(saved.studies[0].delayReason).toBe('Waiting on patient');
   expect(saved.studies[0].notes).toBe('Running behind at facility');
   expect(saved.studies[0].patientOnVanAt).toBeTruthy();
+});
+
+test('starts the next patient while prior documentation is still pending', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+
+  await page.getByRole('button', { name: /Start Stop/i }).click();
+  await page.getByRole('button', { name: /^Pt On Van$/i }).click();
+  await page.getByRole('button', { name: /Pt Leaves Van/i }).click();
+
+  await expect(page.getByRole('heading', { name: 'Pending documentation' })).toBeVisible();
+  await expect(page.getByText('Study 1').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Pt On Van$/i })).toBeVisible();
+
+  await page.getByRole('button', { name: /^Pt On Van$/i }).click();
+  await expect(page.getByRole('heading', { name: 'Patient on van' })).toBeVisible();
+
+  let saved = await page.evaluate(() => JSON.parse(localStorage.getItem('mbss-efficiency-tracker-data') ?? '{}'));
+  expect(saved.studies).toHaveLength(2);
+  expect(saved.studies[0].patientLeavesVanAt).toBeTruthy();
+  expect(saved.studies[0].documentationCompleteAt).toBeUndefined();
+  expect(saved.studies[1].patientOnVanAt).toBeTruthy();
+
+  await page.getByRole('button', { name: /Doc Complete/i }).click();
+  saved = await page.evaluate(() => JSON.parse(localStorage.getItem('mbss-efficiency-tracker-data') ?? '{}'));
+  expect(saved.studies[0].documentationCompleteAt).toBeTruthy();
+  expect(saved.studies[1].documentationCompleteAt).toBeUndefined();
+
+  await page.getByRole('button', { name: /Pt Leaves Van/i }).click();
+  await page.getByRole('button', { name: /Doc Complete/i }).click();
+  await page.getByRole('button', { name: /Finish Stop/i }).click();
+
+  saved = await page.evaluate(() => JSON.parse(localStorage.getItem('mbss-efficiency-tracker-data') ?? '{}'));
+  expect(saved.stops[0].completedAt).toBeTruthy();
+  expect(saved.studies[1].documentationCompleteAt).toBeTruthy();
 });
 
 test('shows selected-date dashboard averages from the saved dated log', async ({ page }) => {

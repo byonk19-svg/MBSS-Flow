@@ -28,7 +28,6 @@ import {
 import { createId } from './ids';
 import {
   activeStop as findActiveStop,
-  activeStudy as findActiveStudy,
   deriveStopMetrics,
   deriveStudyMetrics,
   sortStops,
@@ -484,8 +483,14 @@ function TodayView({
   const todayStops = data.stops.filter((stop) => stop.date === todayKey);
   const todayStudies = data.studies.filter((study) => study.date === todayKey);
   const currentStop = findActiveStop(data);
-  const currentStudy = currentStop ? findActiveStudy(data, currentStop.id) : null;
   const currentStudies = currentStop ? studiesForStop(data, currentStop.id) : [];
+  const draftStudy = currentStudies.find((study) => !study.patientOnVanAt) ?? null;
+  const patientOnVanStudy =
+    currentStudies.find((study) => Boolean(study.patientOnVanAt) && !study.patientLeavesVanAt) ?? null;
+  const pendingDocumentationStudies = currentStudies.filter(
+    (study) => Boolean(study.patientLeavesVanAt) && !study.documentationCompleteAt,
+  );
+  const currentStudy = patientOnVanStudy ?? draftStudy;
   const latestStudy = currentStudies.at(-1) ?? null;
   const correctionStudy = currentStudy ?? latestStudy;
   const nextStudySequenceNumber = Math.max(0, ...currentStudies.map((study) => study.sequenceNumber)) + 1;
@@ -518,7 +523,9 @@ function TodayView({
     if (!currentStop) return;
     const now = nowIso();
     if (currentStudy) {
-      updateActiveStudy({ patientOnVanAt: now });
+      if (!currentStudy.patientOnVanAt) {
+        updateActiveStudy({ patientOnVanAt: now });
+      }
       return;
     }
     const sequenceNumber = nextStudySequenceNumber;
@@ -551,10 +558,33 @@ function TodayView({
     }));
   }
 
+  function updateStudy(study: Study, patch: Partial<Study>) {
+    if (!currentStop) return;
+    const draft = { ...study, ...patch, updatedAt: nowIso() };
+    const updated = { ...draft, date: studyDateKey(draft, currentStop) };
+    const errors = validateStudyTimeline(updated);
+    if (errors.length > 0) {
+      alert(errors.join('\n'));
+      return;
+    }
+    setData((current) => ({
+      ...current,
+      studies: current.studies.map((candidate) => (candidate.id === study.id ? updated : candidate)),
+    }));
+  }
+
   function finishStop() {
     if (!currentStop) return;
-    if (currentStudy) {
-      alert('Complete or correct the active study before finishing this stop.');
+    if (draftStudy) {
+      alert('Start or delete the study draft before finishing this stop.');
+      return;
+    }
+    if (patientOnVanStudy) {
+      alert('Mark Pt Leaves Van before finishing this stop.');
+      return;
+    }
+    if (pendingDocumentationStudies.length > 0) {
+      alert('Complete pending documentation before finishing this stop.');
       return;
     }
     if (!currentStudies.some((study) => study.documentationCompleteAt)) {
@@ -750,7 +780,13 @@ function TodayView({
           <div className="section-heading">
             <div>
               <p className="eyebrow">{correctionStudy.label}</p>
-              <h2>{currentStudy ? 'Active study' : 'Latest study'}</h2>
+              <h2>
+                {patientOnVanStudy?.id === correctionStudy.id
+                  ? 'Patient on van'
+                  : draftStudy?.id === correctionStudy.id
+                    ? 'Study draft'
+                    : 'Latest study'}
+              </h2>
             </div>
           </div>
           <div className="timeline">
@@ -771,6 +807,46 @@ function TodayView({
               ['Patient cycle', formatMetric(studyMetrics?.totalPatientCycleMin ?? null)],
             ]}
           />
+        </section>
+      ) : null}
+
+      {pendingDocumentationStudies.length > 0 ? (
+        <section className="panel pending-docs-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Needs documentation</p>
+              <h2>Pending documentation</h2>
+            </div>
+            <span className="status-dot active">{pendingDocumentationStudies.length} pending</span>
+          </div>
+          <div className="pending-doc-list">
+            {pendingDocumentationStudies.map((study) => {
+              const metrics = deriveStudyMetrics(study);
+              return (
+                <div key={study.id} className="pending-doc-item">
+                  <div>
+                    <strong>{study.label}</strong>
+                    <span>Pt left {formatClock(study.patientLeavesVanAt)}</span>
+                  </div>
+                  <MetricList
+                    metrics={[
+                      ['Study time', formatMetric(metrics.studyDurationMin)],
+                      ['Documentation', formatMetric(metrics.documentationDurationMin)],
+                      ['Delay reason', study.delayReason ?? 'None'],
+                    ]}
+                  />
+                  <button
+                    className="secondary-button strong"
+                    type="button"
+                    onClick={() => updateStudy(study, { documentationCompleteAt: nowIso() })}
+                  >
+                    <Check size={17} aria-hidden="true" />
+                    Doc Complete
+                  </button>
+                </div>
+              );
+            })}
+          </div>
         </section>
       ) : null}
 
