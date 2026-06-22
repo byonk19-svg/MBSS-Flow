@@ -56,6 +56,51 @@ function classNames(...values: Array<string | false | undefined>): string {
   return values.filter(Boolean).join(' ');
 }
 
+function normalizeFacilityLabel(value: string): string {
+  return value.trim() || 'Facility A';
+}
+
+function getFacilityOptions(data: AppData): string[] {
+  return [
+    ...new Set(
+      [...data.settings.defaultFacilityLabels, ...data.stops.map((stop) => stop.facilityLabel)].map(
+        normalizeFacilityLabel,
+      ),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
+}
+
+function latestFacilityLabel(data: AppData): string {
+  return sortStops(data.stops)[0]?.facilityLabel ?? data.settings.defaultFacilityLabels[0] ?? 'Facility A';
+}
+
+function rememberFacilityLabel(data: AppData, facilityLabel: string): AppData {
+  const normalized = normalizeFacilityLabel(facilityLabel);
+  if (data.settings.defaultFacilityLabels.some((label) => label === normalized)) return data;
+  return {
+    ...data,
+    settings: {
+      ...data.settings,
+      defaultFacilityLabels: [...data.settings.defaultFacilityLabels, normalized],
+    },
+  };
+}
+
+function dateKeyFromIso(iso?: string): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return formatDateKey(date);
+}
+
+function stopDateKey(stop: Stop): string {
+  return dateKeyFromIso(stop.parkedAt) ?? stop.date;
+}
+
+function studyDateKey(study: Study, stop: Stop): string {
+  return dateKeyFromIso(study.patientOnVanAt) ?? stopDateKey(stop);
+}
+
 function StatTile({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="stat-tile">
@@ -88,6 +133,126 @@ function MetricList({ metrics }: { metrics: Array<[string, string | number]> }) 
   );
 }
 
+function ActiveFacilityEditor({
+  stop,
+  options,
+  onSave,
+}: {
+  stop: Stop;
+  options: string[];
+  onSave: (facilityLabel: string) => void;
+}) {
+  const [draft, setDraft] = useState(stop.facilityLabel);
+  const normalizedDraft = normalizeFacilityLabel(draft);
+  const hasChange = normalizedDraft !== stop.facilityLabel;
+
+  return (
+    <div className="active-facility-editor">
+      <label>
+        Facility label
+        <input
+          list="active-facility-labels"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          aria-label="Active facility label"
+        />
+      </label>
+      <datalist id="active-facility-labels">
+        {options.map((label) => (
+          <option key={label} value={label} />
+        ))}
+      </datalist>
+      <button
+        className="secondary-button strong"
+        type="button"
+        onClick={() => onSave(normalizedDraft)}
+        disabled={!hasChange}
+      >
+        <Check size={17} aria-hidden="true" />
+        Save Facility
+      </button>
+    </div>
+  );
+}
+
+type StudyDetailsDraft = {
+  complexity: '' | Complexity;
+  delayReason: string;
+  notes: string;
+};
+
+function createStudyDetailsDraft(study: Study | null): StudyDetailsDraft {
+  return {
+    complexity: study?.complexity ?? '',
+    delayReason: study?.delayReason ?? 'None',
+    notes: study?.notes ?? '',
+  };
+}
+
+function StudyDetailsEditor({
+  study,
+  nextLabel,
+  onSave,
+}: {
+  study: Study | null;
+  nextLabel: string;
+  onSave: (draft: StudyDetailsDraft) => void;
+}) {
+  const [draft, setDraft] = useState<StudyDetailsDraft>(() => createStudyDetailsDraft(study));
+  const hasChange = study
+    ? draft.complexity !== (study.complexity ?? '') ||
+      draft.delayReason !== (study.delayReason ?? 'None') ||
+      draft.notes !== (study.notes ?? '')
+    : Boolean(draft.complexity || draft.notes.trim() || draft.delayReason !== 'None');
+
+  function update(field: keyof StudyDetailsDraft, value: string) {
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">{study ? study.label : nextLabel}</p>
+          <h2>Study details</h2>
+        </div>
+      </div>
+      <div className="form-grid">
+        <label>
+          Complexity
+          <select value={draft.complexity} onChange={(event) => update('complexity', event.target.value)}>
+            <option value="">Unselected</option>
+            {COMPLEXITIES.map((complexity) => (
+              <option key={complexity} value={complexity}>
+                {complexity}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Delay reason
+          <select value={draft.delayReason} onChange={(event) => update('delayReason', event.target.value)}>
+            {DELAY_REASONS.map((reason) => (
+              <option key={reason} value={reason}>
+                {reason}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label className="stacked-field">
+        Study notes
+        <textarea value={draft.notes} onChange={(event) => update('notes', event.target.value)} />
+        <span>{PHI_HELPER_TEXT}</span>
+      </label>
+      <button className="primary-action compact-action" type="button" onClick={() => onSave(draft)} disabled={!hasChange}>
+        <Check size={20} aria-hidden="true" />
+        Save Details
+      </button>
+    </section>
+  );
+}
+
 type CorrectionDraft = {
   facilityLabel: string;
   parkedAt: string;
@@ -99,6 +264,8 @@ type CorrectionDraft = {
   delayReason: string;
   studyNotes: string;
 };
+
+type CorrectionMode = 'active' | 'stop' | 'study';
 
 function createCorrectionDraft(stop: Stop, study: Study | null): CorrectionDraft {
   return {
@@ -120,29 +287,42 @@ function CorrectionPanel({
   data,
   onSave,
   onClose,
+  mode = 'active',
 }: {
   stop: Stop;
   study: Study | null;
   data: AppData;
   onSave: (stop: Stop, study: Study | null) => void;
   onClose: () => void;
+  mode?: CorrectionMode;
 }) {
   const [draft, setDraft] = useState<CorrectionDraft>(() => createCorrectionDraft(stop, study));
   const [errors, setErrors] = useState<string[]>([]);
+  const facilityOptions = getFacilityOptions(data);
+  const showStopFields = mode !== 'study';
+  const showStudyFields = Boolean(study) && mode !== 'stop';
+  const heading =
+    mode === 'stop' ? `Stop #${stop.stopNumber}` : mode === 'study' ? study?.label ?? 'Study' : 'Current timestamps';
+  const eyebrow = mode === 'stop' ? 'Edit stop' : mode === 'study' ? 'Edit study' : 'Manual correction';
+  const saveLabel = mode === 'stop' ? 'Save stop' : mode === 'study' ? 'Save study' : 'Save correction';
 
   function update(field: keyof CorrectionDraft, value: string) {
     setDraft((current) => ({ ...current, [field]: value }));
+    setErrors([]);
   }
 
   function save() {
-    const updatedStop: Stop = {
-      ...stop,
-      facilityLabel: draft.facilityLabel.trim() || 'Facility A',
-      parkedAt: fromDateTimeLocalValue(draft.parkedAt) ?? stop.parkedAt,
-      notes: draft.stopNotes,
-      updatedAt: nowIso(),
-    };
-    const updatedStudy: Study | null = study
+    const stopDraft: Stop = showStopFields
+      ? {
+          ...stop,
+          facilityLabel: normalizeFacilityLabel(draft.facilityLabel),
+          parkedAt: fromDateTimeLocalValue(draft.parkedAt) ?? stop.parkedAt,
+          notes: draft.stopNotes,
+          updatedAt: nowIso(),
+        }
+      : stop;
+    const updatedStop: Stop = { ...stopDraft, date: stopDateKey(stopDraft) };
+    const studyDraft: Study | null = study && showStudyFields
       ? {
           ...study,
           patientOnVanAt: fromDateTimeLocalValue(draft.patientOnVanAt),
@@ -153,6 +333,9 @@ function CorrectionPanel({
           notes: draft.studyNotes,
           updatedAt: nowIso(),
         }
+      : study;
+    const updatedStudy: Study | null = studyDraft
+      ? { ...studyDraft, date: studyDateKey(studyDraft, updatedStop) }
       : null;
     const siblingStudies = studiesForStop(data, stop.id).map((candidate) =>
       updatedStudy && candidate.id === updatedStudy.id ? updatedStudy : candidate,
@@ -173,8 +356,8 @@ function CorrectionPanel({
     <section className="panel correction-panel">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Manual correction</p>
-          <h2>Current timestamps</h2>
+          <p className="eyebrow">{eyebrow}</p>
+          <h2>{heading}</h2>
         </div>
         <button className="icon-button" type="button" onClick={onClose} aria-label="Close correction panel">
           <Check size={18} aria-hidden="true" />
@@ -189,27 +372,40 @@ function CorrectionPanel({
         </div>
       ) : null}
 
-      <div className="form-grid">
-        <label>
-          Facility label
-          <input value={draft.facilityLabel} onChange={(event) => update('facilityLabel', event.target.value)} />
-        </label>
-        <label>
-          Parked
-          <input
-            type="datetime-local"
-            value={draft.parkedAt}
-            onChange={(event) => update('parkedAt', event.target.value)}
-          />
-        </label>
-      </div>
-      <label className="stacked-field">
-        Stop notes
-        <textarea value={draft.stopNotes} onChange={(event) => update('stopNotes', event.target.value)} />
-        <span>{PHI_HELPER_TEXT}</span>
-      </label>
+      {showStopFields ? (
+        <>
+          <div className="form-grid">
+            <label>
+              Facility label
+              <input
+                list="correction-facility-labels"
+                value={draft.facilityLabel}
+                onChange={(event) => update('facilityLabel', event.target.value)}
+              />
+            </label>
+            <datalist id="correction-facility-labels">
+              {facilityOptions.map((label) => (
+                <option key={label} value={label} />
+              ))}
+            </datalist>
+            <label>
+              Parked
+              <input
+                type="datetime-local"
+                value={draft.parkedAt}
+                onChange={(event) => update('parkedAt', event.target.value)}
+              />
+            </label>
+          </div>
+          <label className="stacked-field">
+            Stop notes
+            <textarea value={draft.stopNotes} onChange={(event) => update('stopNotes', event.target.value)} />
+            <span>{PHI_HELPER_TEXT}</span>
+          </label>
+        </>
+      ) : null}
 
-      {study ? (
+      {showStudyFields ? (
         <>
           <div className="form-grid">
             <label>
@@ -268,7 +464,7 @@ function CorrectionPanel({
 
       <button className="primary-action compact-action" type="button" onClick={save}>
         <Check size={20} aria-hidden="true" />
-        Save correction
+        {saveLabel}
       </button>
     </section>
   );
@@ -281,9 +477,10 @@ function TodayView({
   data: AppData;
   setData: Dispatch<SetStateAction<AppData>>;
 }) {
-  const [facilityLabel, setFacilityLabel] = useState(data.settings.defaultFacilityLabels[0] ?? 'Facility A');
+  const [facilityLabel, setFacilityLabel] = useState(() => latestFacilityLabel(data));
   const [showCorrection, setShowCorrection] = useState(false);
   const todayKey = formatDateKey();
+  const facilityOptions = getFacilityOptions(data);
   const todayStops = data.stops.filter((stop) => stop.date === todayKey);
   const todayStudies = data.studies.filter((study) => study.date === todayKey);
   const currentStop = findActiveStop(data);
@@ -291,6 +488,8 @@ function TodayView({
   const currentStudies = currentStop ? studiesForStop(data, currentStop.id) : [];
   const latestStudy = currentStudies.at(-1) ?? null;
   const correctionStudy = currentStudy ?? latestStudy;
+  const nextStudySequenceNumber = Math.max(0, ...currentStudies.map((study) => study.sequenceNumber)) + 1;
+  const nextStudyLabel = `Study ${currentStudy?.sequenceNumber ?? nextStudySequenceNumber}`;
   const stopMetrics = currentStop ? deriveStopMetrics(currentStop, currentStudies) : null;
   const studyMetrics = correctionStudy ? deriveStudyMetrics(correctionStudy) : null;
 
@@ -307,22 +506,26 @@ function TodayView({
       id: createId('stop'),
       date,
       stopNumber,
-      facilityLabel: facilityLabel.trim() || 'Facility A',
+      facilityLabel: normalizeFacilityLabel(facilityLabel),
       parkedAt: now,
       createdAt: now,
       updatedAt: now,
     };
-    setData((current) => ({ ...current, stops: [...current.stops, stop] }));
+    setData((current) => rememberFacilityLabel({ ...current, stops: [...current.stops, stop] }, stop.facilityLabel));
   }
 
   function startStudy() {
-    if (!currentStop || currentStudy) return;
+    if (!currentStop) return;
     const now = nowIso();
-    const sequenceNumber = Math.max(0, ...currentStudies.map((study) => study.sequenceNumber)) + 1;
+    if (currentStudy) {
+      updateActiveStudy({ patientOnVanAt: now });
+      return;
+    }
+    const sequenceNumber = nextStudySequenceNumber;
     const study: Study = {
       id: createId('study'),
       stopId: currentStop.id,
-      date: currentStop.date,
+      date: stopDateKey(currentStop),
       sequenceNumber,
       label: `Study ${sequenceNumber}`,
       patientOnVanAt: now,
@@ -334,8 +537,9 @@ function TodayView({
   }
 
   function updateActiveStudy(patch: Partial<Study>) {
-    if (!currentStudy) return;
-    const updated = { ...currentStudy, ...patch, updatedAt: nowIso() };
+    if (!currentStudy || !currentStop) return;
+    const draft = { ...currentStudy, ...patch, updatedAt: nowIso() };
+    const updated = { ...draft, date: studyDateKey(draft, currentStop) };
     const errors = validateStudyTimeline(updated);
     if (errors.length > 0) {
       alert(errors.join('\n'));
@@ -377,6 +581,9 @@ function TodayView({
   const nextAction = (() => {
     if (!currentStop) return { label: 'Start Stop', icon: Play, onClick: startStop };
     if (!currentStudy) return { label: 'Pt On Van', icon: Play, onClick: startStudy };
+    if (!currentStudy.patientOnVanAt) {
+      return { label: 'Pt On Van', icon: Play, onClick: startStudy };
+    }
     if (!currentStudy.patientLeavesVanAt) {
       return { label: 'Pt Leaves Van', icon: SquareCheckBig, onClick: () => updateActiveStudy({ patientLeavesVanAt: nowIso() }) };
     }
@@ -390,11 +597,82 @@ function TodayView({
 
   function saveCorrection(updatedStop: Stop, updatedStudy: Study | null) {
     setData((current) => ({
-      ...current,
+      ...rememberFacilityLabel(current, updatedStop.facilityLabel),
       stops: current.stops.map((stop) => (stop.id === updatedStop.id ? updatedStop : stop)),
       studies: updatedStudy
-        ? current.studies.map((study) => (study.id === updatedStudy.id ? updatedStudy : study))
-        : current.studies,
+        ? current.studies.map((study) =>
+            study.id === updatedStudy.id
+              ? updatedStudy
+              : study.stopId === updatedStop.id
+                ? { ...study, date: studyDateKey(study, updatedStop) }
+                : study,
+          )
+        : current.studies.map((study) =>
+            study.stopId === updatedStop.id ? { ...study, date: studyDateKey(study, updatedStop) } : study,
+          ),
+    }));
+  }
+
+  function saveActiveFacilityLabel(nextFacilityLabel: string) {
+    if (!currentStop) return;
+    const normalized = normalizeFacilityLabel(nextFacilityLabel);
+    setFacilityLabel(normalized);
+    setData((current) =>
+      rememberFacilityLabel(
+        {
+          ...current,
+          stops: current.stops.map((stop) =>
+            stop.id === currentStop.id ? { ...stop, facilityLabel: normalized, updatedAt: nowIso() } : stop,
+          ),
+        },
+        normalized,
+      ),
+    );
+  }
+
+  function saveStudyDetails(draft: StudyDetailsDraft) {
+    if (!currentStop) return;
+    const now = nowIso();
+    setData((current) => {
+      if (currentStudy) {
+        const updatedStudy: Study = {
+          ...currentStudy,
+          complexity: draft.complexity || undefined,
+          delayReason: draft.delayReason || 'None',
+          notes: draft.notes,
+          updatedAt: now,
+        };
+        return {
+          ...current,
+          studies: current.studies.map((study) => (study.id === currentStudy.id ? updatedStudy : study)),
+        };
+      }
+      const sequenceNumber = Math.max(
+        0,
+        ...studiesForStop(current, currentStop.id).map((study) => study.sequenceNumber),
+      ) + 1;
+      const study: Study = {
+        id: createId('study'),
+        stopId: currentStop.id,
+        date: stopDateKey(currentStop),
+        sequenceNumber,
+        label: `Study ${sequenceNumber}`,
+        complexity: draft.complexity || undefined,
+        delayReason: draft.delayReason || 'None',
+        notes: draft.notes,
+        createdAt: now,
+        updatedAt: now,
+      };
+      return { ...current, studies: [...current.studies, study] };
+    });
+  }
+
+  function deleteStudyDraft() {
+    if (!currentStudy || currentStudy.patientOnVanAt) return;
+    if (!confirm(`Delete ${currentStudy.label}?`)) return;
+    setData((current) => ({
+      ...current,
+      studies: current.studies.filter((study) => study.id !== currentStudy.id),
     }));
   }
 
@@ -433,7 +711,7 @@ function TodayView({
             aria-label="Facility label"
           />
           <datalist id="facility-labels">
-            {data.settings.defaultFacilityLabels.map((label) => (
+            {facilityOptions.map((label) => (
               <option key={label} value={label} />
             ))}
           </datalist>
@@ -457,6 +735,12 @@ function TodayView({
               ['Stop total', formatMetric(stopMetrics?.totalStopMin ?? null)],
               ['Minutes per study', formatMetric(stopMetrics?.minutesPerStudy ?? null)],
             ]}
+          />
+          <ActiveFacilityEditor
+            key={`${currentStop.id}:${currentStop.facilityLabel}`}
+            stop={currentStop}
+            options={facilityOptions}
+            onSave={saveActiveFacilityLabel}
           />
         </section>
       )}
@@ -490,6 +774,15 @@ function TodayView({
         </section>
       ) : null}
 
+      {currentStop ? (
+        <StudyDetailsEditor
+          key={currentStudy?.id ?? `${currentStop.id}:next:${nextStudySequenceNumber}`}
+          study={currentStudy}
+          nextLabel={nextStudyLabel}
+          onSave={saveStudyDetails}
+        />
+      ) : null}
+
       <button className="primary-action" type="button" onClick={nextAction.onClick}>
         <NextIcon size={24} aria-hidden="true" />
         {nextAction.label}
@@ -506,6 +799,12 @@ function TodayView({
               <button className="secondary-button" type="button" onClick={finishStop}>
                 <SquareCheckBig size={17} aria-hidden="true" />
                 Finish Stop
+              </button>
+            ) : null}
+            {currentStudy && !currentStudy.patientOnVanAt ? (
+              <button className="secondary-button danger-text" type="button" onClick={deleteStudyDraft}>
+                <Trash2 size={17} aria-hidden="true" />
+                Delete Study Draft
               </button>
             ) : null}
             {currentStudies.length === 0 ? (
@@ -541,6 +840,22 @@ function LogsView({
   setView: (view: ViewKey) => void;
 }) {
   const stops = sortStops(data.stops);
+  const [editTarget, setEditTarget] = useState<
+    | { mode: 'stop'; stopId: string }
+    | { mode: 'study'; stopId: string; studyId: string }
+    | null
+  >(null);
+  const editStop = editTarget ? data.stops.find((stop) => stop.id === editTarget.stopId) ?? null : null;
+  const editStudy =
+    editTarget?.mode === 'study'
+      ? data.studies.find((study) => study.id === editTarget.studyId && study.stopId === editTarget.stopId) ?? null
+      : null;
+  const activeEdit =
+    editTarget?.mode === 'stop' && editStop
+      ? { mode: editTarget.mode, stop: editStop, study: null }
+      : editTarget?.mode === 'study' && editStop && editStudy
+        ? { mode: editTarget.mode, stop: editStop, study: editStudy }
+        : null;
 
   function deleteStop(stop: Stop) {
     if (!confirm(`Delete stop #${stop.stopNumber} and its studies?`)) return;
@@ -587,6 +902,24 @@ function LogsView({
     setView('today');
   }
 
+  function saveLogEdit(updatedStop: Stop, updatedStudy: Study | null) {
+    setData((current) => ({
+      ...rememberFacilityLabel(current, updatedStop.facilityLabel),
+      stops: current.stops.map((stop) => (stop.id === updatedStop.id ? updatedStop : stop)),
+      studies: updatedStudy
+        ? current.studies.map((study) =>
+            study.id === updatedStudy.id
+              ? updatedStudy
+              : study.stopId === updatedStop.id
+                ? { ...study, date: studyDateKey(study, updatedStop) }
+                : study,
+          )
+        : current.studies.map((study) =>
+            study.stopId === updatedStop.id ? { ...study, date: studyDateKey(study, updatedStop) } : study,
+          ),
+    }));
+  }
+
   if (stops.length === 0) {
     return <EmptyState title="No logs yet" body="Start a stop to create the first local log entry." />;
   }
@@ -597,6 +930,16 @@ function LogsView({
         <h1>Logs</h1>
         <p>{stops.length} stops stored on this device</p>
       </div>
+      {activeEdit ? (
+        <CorrectionPanel
+          stop={activeEdit.stop}
+          study={activeEdit.study}
+          data={data}
+          mode={activeEdit.mode}
+          onSave={saveLogEdit}
+          onClose={() => setEditTarget(null)}
+        />
+      ) : null}
       <div className="log-stack">
         {stops.map((stop) => {
           const studies = studiesForStop(data, stop.id);
@@ -645,6 +988,14 @@ function LogsView({
                           ['Complexity', study.complexity ?? 'Unselected'],
                         ]}
                       />
+                      <button
+                        className="text-button"
+                        type="button"
+                        onClick={() => setEditTarget({ mode: 'study', stopId: stop.id, studyId: study.id })}
+                      >
+                        <Pencil size={16} aria-hidden="true" />
+                        Edit Study
+                      </button>
                       <button className="text-button danger-text" type="button" onClick={() => deleteStudy(study)}>
                         <Trash2 size={16} aria-hidden="true" />
                         Delete Study
@@ -660,6 +1011,14 @@ function LogsView({
                     Reopen
                   </button>
                 ) : null}
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => setEditTarget({ mode: 'stop', stopId: stop.id })}
+                >
+                  <Pencil size={17} aria-hidden="true" />
+                  Edit Stop
+                </button>
                 <button className="secondary-button danger-text" type="button" onClick={() => deleteStop(stop)}>
                   <Trash2 size={17} aria-hidden="true" />
                   Delete Stop
@@ -720,9 +1079,10 @@ function aggregateByStops(label: string, stops: Stop[], data: AppData): Aggregat
 
 function DashboardView({ data }: { data: AppData }) {
   const todayKey = formatDateKey();
+  const [selectedDate, setSelectedDate] = useState(todayKey);
   const dashboard = useMemo(() => {
-    const todayStops = data.stops.filter((stop) => stop.date === todayKey);
-    const today = aggregateByStops('Today', todayStops, data);
+    const selectedStops = data.stops.filter((stop) => stop.date === selectedDate);
+    const selectedDay = aggregateByStops(formatDateLabel(selectedDate), selectedStops, data);
     const since = (days: number) => {
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - (days - 1));
@@ -739,23 +1099,23 @@ function DashboardView({ data }: { data: AppData }) {
         ),
       );
     const bottlenecks = [
-      ['Parking to first patient', today.loadDelay],
-      ['Study time', today.studyDuration],
-      ['Documentation time', today.documentation],
-      ['Inter-study gaps', today.interStudyGap],
+      ['Parking to first patient', selectedDay.loadDelay],
+      ['Study time', selectedDay.studyDuration],
+      ['Documentation time', selectedDay.documentation],
+      ['Inter-study gaps', selectedDay.interStudyGap],
     ] as const;
     const biggestDrag = [...bottlenecks]
       .filter(([, value]) => value !== null)
       .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0]?.[0];
     return {
-      today,
+      selectedDay,
       sevenDay: aggregateByStops('7-day', since(7), data),
       thirtyDay: aggregateByStops('30-day', since(30), data),
       facilityRows,
       bottlenecks,
       biggestDrag: biggestDrag ?? 'Incomplete',
     };
-  }, [data, todayKey]);
+  }, [data, selectedDate]);
 
   if (data.stops.length === 0) {
     return <EmptyState title="No dashboard data yet" body="Dashboard metrics appear after completed study timestamps exist." />;
@@ -765,25 +1125,38 @@ function DashboardView({ data }: { data: AppData }) {
     <main className="screen">
       <div className="screen-title">
         <h1>Dashboard</h1>
-        <p>Incomplete timestamps stay incomplete instead of being averaged.</p>
+        <p>Pick a date to review that day. Incomplete timestamps stay incomplete instead of being averaged.</p>
       </div>
 
+      <section className="panel dashboard-date-panel">
+        <label>
+          Dashboard date
+          <input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} />
+        </label>
+      </section>
+
       <section className="stat-grid">
-        <StatTile label="Stops today" value={dashboard.today.stopCount} />
-        <StatTile label="Studies today" value={dashboard.today.studyCount} />
+        <StatTile label="Stops selected" value={dashboard.selectedDay.stopCount} />
+        <StatTile label="Studies selected" value={dashboard.selectedDay.studyCount} />
         <StatTile label="Biggest drag" value={dashboard.biggestDrag} />
       </section>
 
       <section className="panel">
         <div className="section-heading">
-          <h2>Today Summary</h2>
+          <div>
+            <p className="eyebrow">Selected day</p>
+            <h2>{dashboard.selectedDay.label}</h2>
+          </div>
         </div>
         <MetricList
           metrics={[
-            ['Average study duration', formatMetric(dashboard.today.studyDuration)],
-            ['Average documentation duration', formatMetric(dashboard.today.documentation)],
-            ['Average patient cycle', formatMetric(dashboard.today.patientCycle)],
-            ['Average minutes per study', formatMetric(dashboard.today.minutesPerStudy)],
+            ['Average load delay', formatMetric(dashboard.selectedDay.loadDelay)],
+            ['Average study duration', formatMetric(dashboard.selectedDay.studyDuration)],
+            ['Average documentation duration', formatMetric(dashboard.selectedDay.documentation)],
+            ['Average patient cycle', formatMetric(dashboard.selectedDay.patientCycle)],
+            ['Average minutes per study', formatMetric(dashboard.selectedDay.minutesPerStudy)],
+            ['Average inter-study gap', formatMetric(dashboard.selectedDay.interStudyGap)],
+            ['Common delay reason', dashboard.selectedDay.commonDelay],
           ]}
         />
       </section>
